@@ -1,44 +1,113 @@
-# STM32 Smart Tray Controller
+# STM32 상시 계층 컨트롤러
 
-SafeAid Kit의 Jetson-STM32 하드웨어 제어용 STM32 펌웨어 초안입니다. Jetson 앱은 USB Serial/UART로 명령을 보내고, STM32F401RET6는 DM-S1300MD 서보, 구역 LED, 재고 센서, 배터리 전압, 이후 SIM7670G AT command 처리를 담당합니다.
+> **폴더 이름 `stm32_smart_tray_controller`는 구 도메인(구급함 트레이) 잔재입니다.**
+> git 이력 보존을 위해 폴더명은 유지하고 내용만 교체합니다. 새 역할은 **트레이 제어가 아닙니다.**
+>
+> **현재 `.ino`는 구 도메인 코드(서보·LED·재고 센서)이며 전면 재작성 대상입니다.**
+
+STM32F401RET6는 **상시 전원 관리자 + 센서 허브 + GNSS 로거**입니다.
+Jetson과 독립적으로 동작하며, **Jetson 전원을 MOSFET로 물리 차단**합니다.
+이 이중 계층이 14일 운용을 성립시키는 유일한 근거입니다.
+
+## 담당 범위
+
+| 구분 | 항목 | 주기 |
+|---|---|---|
+| **생명 안전** | CO 센서 감시 (ZE07-CO / ZE15-CO, 전기화학식) | 1 Hz |
+| 환경 | 온·습도 (SHT40) / 기압 (BMP390) | 1/60 Hz |
+| 측위 | GNSS (Air530, UART/NMEA) + 자동 위치 로깅 | 1 Hz / 60초 저장 |
+| 방위·시각 | 지자기 (MMC5983MA) + IMU + RTC (DS3231) | 요청 시 |
+| 전원 | 배터리 쿨롱 카운팅 (MAX17205), Jetson 전원 게이팅 | 상시 |
+| 출력 | 부저 · 진동 모터 · 스트로브 LED · 상태 LED · 물리 버튼 3개 | 이벤트 |
+
+**목표 소비: S1 감시 0.25~0.4 W / S2 항법(GNSS 연속) 0.4~0.6 W.**
+
+## STM32 단독으로 완결되어야 하는 것 — Jetson 없이
+
+부팅에 15초 걸리는 경로에 사람 목숨을 걸지 않습니다.
+
+```text
+CO 주의            -> 부저 약 + 진동                (Jetson 기동 불필요)
+CO 경보            -> 부저 최대 + 진동 + 적색 LED   (Jetson 기동 불필요)
+저온 경보          -> 부저
+배터리 임계 경보   -> 부저
+조난 신호 모드     -> 부저/스트로브 6회/분 반복 (국제 조난 신호)
+GPS 자동 위치 로깅 -> 내장 플래시
+```
+
+### CO 임계값 — 2단 구성
+
+```text
+[주의]  35 ppm 이상 3분 지속  또는  10분 내 +20 ppm 급상승
+[경보]  100 ppm 이상 즉시
+        또는 UL 2034 곡선 도달 (70 ppm/60분, 150 ppm/10분, 400 ppm/4분)
+```
+
+가정용 표준(UL 2034)은 오경보 억제를 위해 30 ppm 미만 경보를 금지하고 70 ppm에서 60~240분을 기다립니다.
+텐트는 부피가 훨씬 작아 농도가 빨리 오르므로 **의도적으로 더 공격적으로** 잡았습니다.
+절대 농도뿐 아니라 **상승률**을 함께 판정하며, 두 조건 모두 STM32 단독으로 처리합니다.
+
+## Jetson 기동 조건 — 이것만
+
+```text
+1. 물리 버튼 입력
+2. 화면 거치 해제 감지 (홀 센서)
+3. 임계 초과로 음성 안내가 필요할 때
+     - 트레일 이탈 > 임계 거리
+     - 잔여 일조 시간 < 소요 예상 시간
+     - 기압 급강하 (3시간 -4 hPa 이상)
+4. 예약 시각 (아침 브리핑)
+```
 
 ## Serial Protocol
 
-Baud rate: `115200`
+Baud rate: `115200`. 응답은 한 줄 JSON.
 
 ```text
-OPEN_LAYER 1
-OPEN_LAYER 2
-OPEN_LAYER 3
-SET_CELL_LED 2-3
-CLOSE_ALL
-READ_STOCK
-GET_BATTERY
+GET_FIX              현재 GNSS 좌표 · 정확도 · 위성 수
+GET_ENV              온도 · 습도 · 기압 · CO ppm
+GET_HEADING          기울기 보정 방위
+GET_POWER            배터리 %, 잔여 추정 일수, 충전 상태
+GET_TRACK <n>        최근 위치 로그 n개
+MARK_WAYPOINT <type> 체크포인트 저장 (tent / basecamp / water / bailout)
+SET_ALARM <cond>     임계 등록
+DISTRESS ON|OFF      조난 신호 모드
+JETSON PWR ON|OFF    전원 게이팅 (Jetson 자신도 OFF 요청 가능)
 ```
-
-응답은 한 줄 JSON 형태입니다.
 
 ```json
-{"ok":true,"event":"open_layer","layer":2}
+{"ok":true,"event":"fix","lat":37.12345,"lon":128.54321,"acc_m":6.2,"sats":11,"age_s":2}
 ```
 
-## Pin Map
+**미수신 시 좌표를 추정으로 채우지 않습니다.** `{"ok":true,"event":"fix","fix":false,"last_age_s":840}`
 
-실제 보드와 배선에 맞게 `.ino` 상단 배열을 수정하세요.
+## 배선 요점
 
-- `SERVO_PINS`: DM-S1300MD 서보 4개. 현재 `OPEN_LAYER`는 앞의 3개를 층 구동에 사용하고, 4번째는 상부 뚜껑/보조 잠금/예비 액추에이터 후보입니다.
-- `CELL_LED_PINS`: 현재 LED 배치 10구역. `1-1`~`1-3`, `2-1`~`2-6`, `3-1`.
-- `STOCK_SENSOR_PINS`: LED 구역과 같은 10구역의 재고/존재 감지 센서.
-- `BATTERY_ADC_PIN`: 4S LiFePO4 `BAT_IN` 분압 입력.
+| 인터페이스 | 연결 |
+|---|---|
+| UART1 | GNSS Air530 (**VCC 3.3 V** — 5 V로 주면 로직도 5 V로 나옴) |
+| UART2 | CO 센서 (ZE07/ZE15) |
+| UART3 | Jetson 명령 채널 |
+| I2C1 | SHT40 · BMP390 · MMC5983MA · IMU · DS3231 · MAX17205 |
+| GPIO | 부저 · 진동 · 스트로브 · 상태 LED · 물리 버튼 3 · 홀 센서 |
+| GPIO | **Jetson 전원 게이팅 (P-ch MOSFET 고측 스위치)** |
 
-전원은 `5V_COMPUTE`, `5V_LED`, `6V_SERVO`, `3V3_LOGIC`, `BAT_SIM`으로 분리합니다. 서보 전원은 STM32 보드에서 공급하지 않고 별도 6V rail을 사용하며, GND만 star point 기준으로 공통화합니다.
+**자기계는 배터리·스피커·진동 모터에서 최대한 멀리 배치하고 하드아이언 보정 루틴을 반드시 넣습니다.**
+근처에 두면 방위가 무너집니다.
 
-## Power Assumptions
+## 전원 가정
 
-- Battery/main input: 4S LiFePO4, `BAT_IN` 10V~14.6V
-- Logic rail: 3.3V
-- Servo rail: 6V, peak 12A~15A
-- LED rail: 5V, 실제 총 길이 기준으로 전류 계산
-- Jetson/LCD/USB audio rail: 5V_COMPUTE, LED/서보 부하와 분리
+- 배터리: **4S Li-ion 21700**, `BAT_IN` 12.0 V ~ 16.8 V (공칭 14.4 V)
+- Jetson DC잭 입력 범위가 9~20 V이므로 **4S 직결. 승압 컨버터 없음**
+- 로직 rail: 3.3 V — 저정지전류(Iq) 벅에서 **상시 급전**
+- Jetson rail: MOSFET 게이팅. OFF일 때 **진짜 0 W** (소프트웨어 슬립 아님)
+- **저온 보호**: 0°C 이하 충전은 리튬 도금으로 영구 손상. BMS만 믿지 말고 **펌웨어에서 이중 차단**
 
-서보 rail에는 fuse/eFuse, TVS, bulk capacitor, 각 커넥터 근처 capacitor를 넣고, PWM line에는 series resistor와 pulldown을 둡니다.
+구 도메인의 서보 rail(6 V, 12~15 A)은 삭제되었습니다.
+
+## 삭제된 것
+
+- DM-S1300MD 서보 4개, `OPEN_LAYER` / `CLOSE_ALL` 명령
+- 구역 LED 10개, `SET_CELL_LED` 명령
+- 재고 감지 센서 10개, `READ_STOCK` 명령
+- SIM7670G AT command 처리
