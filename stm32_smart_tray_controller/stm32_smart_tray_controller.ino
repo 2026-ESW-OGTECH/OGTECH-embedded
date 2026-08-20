@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Adafruit_BMP3XX.h>
 #include <Wire.h>
 
 // STM32F401RE / STM32duino 3.x 기준 핀. Uart 생성자 순서는 RX, TX입니다.
@@ -8,7 +9,14 @@ Uart CoSerial(PC7, PC6);     // USART6: ZE07-CO TX -> PC7
 constexpr uint32_t BUZZER_PIN = PB0;
 constexpr uint32_t VIBRATION_PIN = PB1;
 constexpr uint32_t STROBE_PIN = PC8;
+constexpr uint32_t JETSON_POWER_GATE_PIN = PC9;
+constexpr uint32_t POWER_BUTTON_PIN = PA0;
+constexpr uint32_t CHECKPOINT_BUTTON_PIN = PA1;
+constexpr uint32_t VOICE_BUTTON_PIN = PA4;
 constexpr uint8_t SHT40_ADDRESS = 0x44;
+constexpr uint8_t DS3231_ADDRESS = 0x68;
+constexpr uint8_t BMP390_PRIMARY_ADDRESS = 0x77;
+constexpr uint8_t BMP390_SECONDARY_ADDRESS = 0x76;
 
 constexpr uint32_t HOST_BAUD = 115200;
 constexpr uint32_t GPS_BAUD = 9600;
@@ -16,6 +24,15 @@ constexpr uint32_t CO_BAUD = 9600;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 1000;
 constexpr uint32_t GPS_STALE_MS = 3000;
 constexpr uint32_t SENSOR_STALE_MS = 3000;
+constexpr uint32_t RTC_INTERVAL_MS = 1000;
+constexpr uint32_t BMP390_READ_INTERVAL_MS = 5000;
+constexpr uint32_t BMP390_STALE_MS = 15000;
+constexpr uint32_t BMP390_RETRY_INTERVAL_MS = 30000;
+constexpr uint32_t PRESSURE_TREND_SAMPLE_MS = 60000;
+constexpr uint32_t PRESSURE_TREND_MIN_SPAN_MS = 600000;
+constexpr size_t PRESSURE_TREND_HISTORY_SIZE = 31;
+// 10분 이상 회귀 기울기가 시간당 ±0.5 hPa를 넘을 때만 방향을 말합니다 [추정].
+constexpr float PRESSURE_TREND_THRESHOLD_HPA_PER_HOUR = 0.5f;
 constexpr uint32_t CO_WARMUP_MS = 300000;  // 제조사 첫 사용 주의사항: 최소 5분
 
 constexpr float CO_WARNING_PPM = 35.0f;
@@ -24,6 +41,11 @@ constexpr float CO_IMMEDIATE_ALARM_PPM = 100.0f;
 constexpr float CO_CLEAR_PPM = 30.0f;
 constexpr uint32_t CO_CLEAR_HOLD_MS = 30000;
 constexpr size_t CO_HISTORY_SECONDS = 600;
+constexpr uint32_t TRAIL_ALERT_WATCHDOG_MS = 5000;
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 40;
+constexpr uint32_t POWER_LONG_PRESS_MS = 2000;
+constexpr uint32_t POWER_ACK_CUT_DELAY_MS = 90000;
+constexpr uint32_t POWER_PENDING_TIMEOUT_MS = 120000;
 
 char gpsLine[160];
 size_t gpsLineLength = 0;
@@ -44,6 +66,32 @@ bool environmentHasValue = false;
 float temperatureC = NAN;
 float humidityPct = NAN;
 
+Adafruit_BMP3XX bmp390;
+bool bmp390Ready = false;
+uint8_t bmp390Address = 0;
+uint8_t bmp390ConsecutiveFailures = 0;
+bool bmp390InitAttempted = false;
+uint32_t bmp390LastInitAttemptMs = 0;
+uint32_t bmp390LastReadAttemptMs = 0;
+uint32_t pressureLastUpdateMs = 0;
+bool pressureHasValue = false;
+float pressureHpa = NAN;
+
+struct PressureTrendSample {
+  uint32_t atMs;
+  float pressureHpa;
+};
+
+PressureTrendSample pressureTrendHistory[PRESSURE_TREND_HISTORY_SIZE];
+size_t pressureTrendCount = 0;
+size_t pressureTrendNext = 0;
+uint32_t pressureTrendLastSampleMs = 0;
+
+bool rtcValid = false;
+uint32_t rtcLastReadMs = 0;
+uint32_t rtcLastUpdateMs = 0;
+char rtcIsoUtc[21] = "";
+
 uint8_t coFrame[9];
 size_t coFrameLength = 0;
 uint32_t coLastUpdateMs = 0;
@@ -60,12 +108,37 @@ uint32_t coAbove400SinceMs = 0;
 uint32_t coSafeSinceMs = 0;
 bool coWarning = false;
 bool coAlarmLatched = false;
+uint8_t trailAlertLevel = 0;  // 0=off, 1=accuracy unknown caution, 2=confirmed alert
+uint32_t trailAlertRefreshMs = 0;
 
 char hostCommand[64];
 size_t hostCommandLength = 0;
 bool streamEnabled = true;
 uint32_t telemetrySequence = 0;
 uint32_t lastTelemetryMs = 0;
+uint32_t buttonSequence = 0;
+uint32_t outputSequence = 0;
+uint32_t powerSequence = 0;
+bool jetsonPowerGateOn = true;
+bool powerShutdownPending = false;
+bool powerGateOffScheduled = false;
+uint32_t powerShutdownRequestedMs = 0;
+uint32_t powerGateOffScheduledMs = 0;
+
+struct ButtonInput {
+  uint32_t pin;
+  const char* name;
+  bool rawPressed;
+  bool stablePressed;
+  uint32_t rawChangedMs;
+  uint32_t pressedMs;
+};
+
+ButtonInput buttons[] = {
+    {POWER_BUTTON_PIN, "power", false, false, 0, 0},
+    {CHECKPOINT_BUTTON_PIN, "checkpoint", false, false, 0, 0},
+    {VOICE_BUTTON_PIN, "voice", false, false, 0, 0},
+};
 
 class FixedBufferWriter : public Print {
  public:
@@ -109,6 +182,112 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t length) {
   return crc;
 }
 
+void sendChecksummedJson(char* base, size_t length) {
+  if (length < 2 || base[length - 1] != '}') return;
+  const uint16_t checksum = crc16Ccitt(
+      reinterpret_cast<const uint8_t*>(base), length);
+  base[length - 1] = '\0';
+  char checksumText[5];
+  snprintf(checksumText, sizeof(checksumText), "%04X", checksum);
+  Serial.print(base);
+  Serial.print(",\"crc16\":\"");
+  Serial.print(checksumText);
+  Serial.println("\"}");
+}
+
+void sendButtonEvent(const ButtonInput& button, bool pressed, uint32_t heldMs) {
+  char base[190];
+  FixedBufferWriter output(base, sizeof(base));
+  output.print("{\"v\":1,\"event\":\"button\",\"seq\":");
+  output.print(buttonSequence++);
+  output.print(",\"button\":\""); output.print(button.name);
+  output.print("\",\"state\":\""); output.print(pressed ? "pressed" : "released");
+  output.print("\",\"held_ms\":"); output.print(heldMs);
+  output.print("}");
+  if (!output.overflowed()) sendChecksummedJson(base, output.length());
+}
+
+void sendOutputEvent(const char* level, bool active) {
+  char base[200];
+  FixedBufferWriter output(base, sizeof(base));
+  output.print("{\"v\":1,\"event\":\"output\",\"seq\":");
+  output.print(outputSequence++);
+  output.print(",\"output\":\"trail\",\"level\":\""); output.print(level);
+  output.print("\",\"active\":"); output.print(active ? "true" : "false");
+  output.print(",\"watchdog_ms\":"); output.print(TRAIL_ALERT_WATCHDOG_MS);
+  output.print("}");
+  if (!output.overflowed()) sendChecksummedJson(base, output.length());
+}
+
+void sendPowerEvent(const char* state) {
+  char base[220];
+  FixedBufferWriter output(base, sizeof(base));
+  output.print("{\"v\":1,\"event\":\"power\",\"seq\":");
+  output.print(powerSequence++);
+  output.print(",\"state\":\""); output.print(state);
+  output.print("\",\"gate_on\":"); output.print(jetsonPowerGateOn ? "true" : "false");
+  output.print(",\"shutdown_pending\":");
+  output.print(powerShutdownPending ? "true" : "false");
+  output.print("}");
+  if (!output.overflowed()) sendChecksummedJson(base, output.length());
+}
+
+void handlePowerButtonRelease(uint32_t now, uint32_t heldMs) {
+  if (!jetsonPowerGateOn) {
+    jetsonPowerGateOn = true;
+    powerShutdownPending = false;
+    powerGateOffScheduled = false;
+    digitalWrite(JETSON_POWER_GATE_PIN, HIGH);
+    sendPowerEvent("gate_on");
+    return;
+  }
+  if (heldMs < POWER_LONG_PRESS_MS || powerShutdownPending) return;
+  powerShutdownPending = true;
+  powerShutdownRequestedMs = now;
+  sendPowerEvent("shutdown_requested");
+}
+
+void updatePowerGate(uint32_t now) {
+  if (powerGateOffScheduled &&
+      static_cast<uint32_t>(now - powerGateOffScheduledMs) >= POWER_ACK_CUT_DELAY_MS) {
+    powerGateOffScheduled = false;
+    powerShutdownPending = false;
+    jetsonPowerGateOn = false;
+    digitalWrite(JETSON_POWER_GATE_PIN, LOW);
+    sendPowerEvent("gate_off");
+    return;
+  }
+  if (powerShutdownPending && !powerGateOffScheduled &&
+      static_cast<uint32_t>(now - powerShutdownRequestedMs) >= POWER_PENDING_TIMEOUT_MS) {
+    powerShutdownPending = false;
+    sendPowerEvent("shutdown_timeout");
+  }
+}
+
+void updateButtons(uint32_t now) {
+  for (ButtonInput& button : buttons) {
+    const bool rawPressed = digitalRead(button.pin) == LOW;
+    if (rawPressed != button.rawPressed) {
+      button.rawPressed = rawPressed;
+      button.rawChangedMs = now;
+    }
+    if (rawPressed == button.stablePressed ||
+        static_cast<uint32_t>(now - button.rawChangedMs) < BUTTON_DEBOUNCE_MS) {
+      continue;
+    }
+    button.stablePressed = rawPressed;
+    if (rawPressed) {
+      button.pressedMs = now;
+      sendButtonEvent(button, true, 0);
+    } else {
+      const uint32_t heldMs = static_cast<uint32_t>(now - button.pressedMs);
+      if (strcmp(button.name, "power") == 0) handlePowerButtonRelease(now, heldMs);
+      // 전원 이벤트를 먼저 내보내 MAP가 pending을 확인한 뒤 release SSE를 전달하게 한다.
+      sendButtonEvent(button, false, heldMs);
+    }
+  }
+}
+
 uint8_t shtCrc8(const uint8_t* data, size_t length) {
   uint8_t crc = 0xFF;
   for (size_t index = 0; index < length; ++index) {
@@ -121,6 +300,151 @@ uint8_t shtCrc8(const uint8_t* data, size_t length) {
   return crc;
 }
 
+uint8_t bcdToBinary(uint8_t value) {
+  return static_cast<uint8_t>((value >> 4) * 10 + (value & 0x0F));
+}
+
+uint8_t binaryToBcd(uint8_t value) {
+  return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+}
+
+bool leapYear(uint16_t year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+uint8_t daysInMonth(uint16_t year, uint8_t month) {
+  static const uint8_t days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) return 0;
+  return month == 2 && leapYear(year) ? 29 : days[month - 1];
+}
+
+bool parseFixedRtcUtc(
+    const char* text,
+    uint16_t& year,
+    uint8_t& month,
+    uint8_t& day,
+    uint8_t& hour,
+    uint8_t& minute,
+    uint8_t& second) {
+  if (text == nullptr || strlen(text) != 20 || text[4] != '-' || text[7] != '-' ||
+      text[10] != 'T' || text[13] != ':' || text[16] != ':' || text[19] != 'Z') {
+    return false;
+  }
+  const uint8_t digitPositions[] = {0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18};
+  for (const uint8_t position : digitPositions) {
+    if (!isdigit(static_cast<unsigned char>(text[position]))) return false;
+  }
+  year = static_cast<uint16_t>(
+      (text[0] - '0') * 1000 + (text[1] - '0') * 100 +
+      (text[2] - '0') * 10 + (text[3] - '0'));
+  month = static_cast<uint8_t>((text[5] - '0') * 10 + (text[6] - '0'));
+  day = static_cast<uint8_t>((text[8] - '0') * 10 + (text[9] - '0'));
+  hour = static_cast<uint8_t>((text[11] - '0') * 10 + (text[12] - '0'));
+  minute = static_cast<uint8_t>((text[14] - '0') * 10 + (text[15] - '0'));
+  second = static_cast<uint8_t>((text[17] - '0') * 10 + (text[18] - '0'));
+  return year >= 2025 && year <= 2100 && month >= 1 && month <= 12 &&
+      day >= 1 && day <= daysInMonth(year, month) && hour <= 23 &&
+      minute <= 59 && second <= 59;
+}
+
+bool provisionRtcUtc(const char* text, uint32_t now) {
+  uint16_t year = 0;
+  uint8_t month = 0;
+  uint8_t day = 0;
+  uint8_t hour = 0;
+  uint8_t minute = 0;
+  uint8_t second = 0;
+  if (!parseFixedRtcUtc(text, year, month, day, hour, minute, second)) return false;
+
+  Wire.beginTransmission(DS3231_ADDRESS);
+  Wire.write(0x00);
+  Wire.write(binaryToBcd(second));
+  Wire.write(binaryToBcd(minute));
+  Wire.write(binaryToBcd(hour));  // 24시간 형식
+  Wire.write(1);                  // day-of-week는 항법 계산에 사용하지 않습니다.
+  Wire.write(binaryToBcd(day));
+  uint8_t monthRegister = binaryToBcd(month);
+  if (year >= 2100) monthRegister |= 0x80;
+  Wire.write(monthRegister);
+  Wire.write(binaryToBcd(static_cast<uint8_t>(year % 100)));
+  if (Wire.endTransmission() != 0) return false;
+
+  uint8_t status = 0;
+  if (!readDs3231Register(0x0F, status)) return false;
+  Wire.beginTransmission(DS3231_ADDRESS);
+  Wire.write(0x0F);
+  Wire.write(static_cast<uint8_t>(status & ~0x80));  // OSF만 해제합니다.
+  if (Wire.endTransmission() != 0) return false;
+
+  rtcLastReadMs = now - RTC_INTERVAL_MS;
+  updateRtc(now);
+  return rtcValid;
+}
+
+bool readDs3231Register(uint8_t reg, uint8_t& value) {
+  Wire.beginTransmission(DS3231_ADDRESS);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(DS3231_ADDRESS, static_cast<uint8_t>(1)) != 1) return false;
+  value = Wire.read();
+  return true;
+}
+
+void updateRtc(uint32_t now) {
+  if (static_cast<uint32_t>(now - rtcLastReadMs) < RTC_INTERVAL_MS) return;
+  rtcLastReadMs = now;
+  uint8_t status = 0;
+  if (!readDs3231Register(0x0F, status) || (status & 0x80) != 0) {
+    rtcValid = false;
+    return;
+  }
+  Wire.beginTransmission(DS3231_ADDRESS);
+  Wire.write(0x00);
+  if (Wire.endTransmission(false) != 0 ||
+      Wire.requestFrom(DS3231_ADDRESS, static_cast<uint8_t>(7)) != 7) {
+    rtcValid = false;
+    return;
+  }
+  const uint8_t second = bcdToBinary(Wire.read() & 0x7F);
+  const uint8_t minute = bcdToBinary(Wire.read() & 0x7F);
+  const uint8_t rawHour = Wire.read();
+  Wire.read();  // day-of-week는 날짜 검증에 사용하지 않습니다.
+  const uint8_t day = bcdToBinary(Wire.read() & 0x3F);
+  const uint8_t rawMonth = Wire.read();
+  const uint8_t yearLow = bcdToBinary(Wire.read());
+  uint8_t hour = 0;
+  if ((rawHour & 0x40) != 0) {
+    hour = bcdToBinary(rawHour & 0x1F);
+    if (hour < 1 || hour > 12) {
+      rtcValid = false;
+      return;
+    }
+    if ((rawHour & 0x20) != 0 && hour != 12) hour += 12;
+    if ((rawHour & 0x20) == 0 && hour == 12) hour = 0;
+  } else {
+    hour = bcdToBinary(rawHour & 0x3F);
+  }
+  const uint8_t month = bcdToBinary(rawMonth & 0x1F);
+  const uint16_t year = static_cast<uint16_t>(2000 + yearLow + ((rawMonth & 0x80) ? 100 : 0));
+  if (second > 59 || minute > 59 || hour > 23 || month < 1 || month > 12 ||
+      day < 1 || day > daysInMonth(year, month) || year < 2025 || year > 2100) {
+    rtcValid = false;
+    return;
+  }
+  snprintf(
+      rtcIsoUtc,
+      sizeof(rtcIsoUtc),
+      "%04u-%02u-%02uT%02u:%02u:%02uZ",
+      year,
+      month,
+      day,
+      hour,
+      minute,
+      second);
+  rtcValid = true;
+  rtcLastUpdateMs = now;
+}
+
 bool elapsedAtLeast(uint32_t now, uint32_t started, uint32_t duration) {
   return started != 0 && static_cast<uint32_t>(now - started) >= duration;
 }
@@ -131,6 +455,11 @@ bool gpsFixLive(uint32_t now) {
 
 bool environmentFresh(uint32_t now) {
   return environmentHasValue && static_cast<uint32_t>(now - environmentLastUpdateMs) <= SENSOR_STALE_MS;
+}
+
+bool pressureFresh(uint32_t now) {
+  return pressureHasValue &&
+      static_cast<uint32_t>(now - pressureLastUpdateMs) <= BMP390_STALE_MS;
 }
 
 bool coFresh(uint32_t now) {
@@ -243,6 +572,121 @@ void updateEnvironment(uint32_t now) {
   }
 }
 
+void resetPressureObservationSession() {
+  pressureHasValue = false;
+  pressureHpa = NAN;
+  pressureLastUpdateMs = 0;
+  pressureTrendCount = 0;
+  pressureTrendNext = 0;
+  pressureTrendLastSampleMs = 0;
+}
+
+bool initializeBmp390(uint32_t now) {
+  bmp390InitAttempted = true;
+  bmp390LastInitAttemptMs = now;
+  const uint8_t addresses[] = {BMP390_PRIMARY_ADDRESS, BMP390_SECONDARY_ADDRESS};
+  for (const uint8_t address : addresses) {
+    if (!bmp390.begin_I2C(address, &Wire)) continue;
+    const bool configured =
+        bmp390.setTemperatureOversampling(BMP3_OVERSAMPLING_2X) &&
+        bmp390.setPressureOversampling(BMP3_OVERSAMPLING_8X) &&
+        bmp390.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3) &&
+        bmp390.setOutputDataRate(BMP3_ODR_0_2_HZ);
+    if (!configured) continue;
+    resetPressureObservationSession();
+    bmp390Ready = true;
+    bmp390Address = address;
+    bmp390ConsecutiveFailures = 0;
+    bmp390LastReadAttemptMs = now - BMP390_READ_INTERVAL_MS;
+    return true;
+  }
+  bmp390Ready = false;
+  bmp390Address = 0;
+  resetPressureObservationSession();
+  return false;
+}
+
+void appendPressureTrendSample(uint32_t now, float valueHpa) {
+  if (pressureTrendCount > 0 &&
+      static_cast<uint32_t>(now - pressureTrendLastSampleMs) < PRESSURE_TREND_SAMPLE_MS) {
+    return;
+  }
+  pressureTrendHistory[pressureTrendNext] = {now, valueHpa};
+  pressureTrendNext = (pressureTrendNext + 1) % PRESSURE_TREND_HISTORY_SIZE;
+  if (pressureTrendCount < PRESSURE_TREND_HISTORY_SIZE) ++pressureTrendCount;
+  pressureTrendLastSampleMs = now;
+}
+
+const char* pressureTrendName() {
+  if (pressureTrendCount < 2) return "unknown";
+  const size_t oldestIndex =
+      (pressureTrendNext + PRESSURE_TREND_HISTORY_SIZE - pressureTrendCount) %
+      PRESSURE_TREND_HISTORY_SIZE;
+  const size_t newestIndex =
+      (pressureTrendNext + PRESSURE_TREND_HISTORY_SIZE - 1) % PRESSURE_TREND_HISTORY_SIZE;
+  const uint32_t spanMs = static_cast<uint32_t>(
+      pressureTrendHistory[newestIndex].atMs - pressureTrendHistory[oldestIndex].atMs);
+  if (spanMs < PRESSURE_TREND_MIN_SPAN_MS) return "unknown";
+
+  // millis() 래핑을 보존한 상대 시간으로 최소제곱 기울기를 계산합니다.
+  float sumX = 0.0f;
+  float sumY = 0.0f;
+  float sumXX = 0.0f;
+  float sumXY = 0.0f;
+  for (size_t offset = 0; offset < pressureTrendCount; ++offset) {
+    const size_t index = (oldestIndex + offset) % PRESSURE_TREND_HISTORY_SIZE;
+    const float hours = static_cast<uint32_t>(
+        pressureTrendHistory[index].atMs - pressureTrendHistory[oldestIndex].atMs) /
+        3600000.0f;
+    const float pressure = pressureTrendHistory[index].pressureHpa;
+    sumX += hours;
+    sumY += pressure;
+    sumXX += hours * hours;
+    sumXY += hours * pressure;
+  }
+  const float count = static_cast<float>(pressureTrendCount);
+  const float denominator = count * sumXX - sumX * sumX;
+  if (fabsf(denominator) < 0.000001f) return "unknown";
+  const float slopeHpaPerHour = (count * sumXY - sumX * sumY) / denominator;
+  if (slopeHpaPerHour > PRESSURE_TREND_THRESHOLD_HPA_PER_HOUR) return "rising";
+  if (slopeHpaPerHour < -PRESSURE_TREND_THRESHOLD_HPA_PER_HOUR) return "falling";
+  return "steady";
+}
+
+void updatePressure(uint32_t now) {
+  if (!bmp390Ready) {
+    if (!bmp390InitAttempted ||
+        static_cast<uint32_t>(now - bmp390LastInitAttemptMs) >= BMP390_RETRY_INTERVAL_MS) {
+      initializeBmp390(now);
+    }
+    return;
+  }
+  if (static_cast<uint32_t>(now - bmp390LastReadAttemptMs) < BMP390_READ_INTERVAL_MS) return;
+  bmp390LastReadAttemptMs = now;
+  if (!bmp390.performReading()) {
+    if (++bmp390ConsecutiveFailures >= 3) {
+      bmp390Ready = false;
+      bmp390Address = 0;
+      resetPressureObservationSession();
+    }
+    return;
+  }
+  const float valueHpa = static_cast<float>(bmp390.pressure / 100.0);
+  if (!isfinite(valueHpa) || valueHpa < 300.0f || valueHpa > 1100.0f) {
+    if (++bmp390ConsecutiveFailures >= 3) {
+      bmp390Ready = false;
+      bmp390Address = 0;
+      resetPressureObservationSession();
+    }
+    return;
+  }
+  bmp390ConsecutiveFailures = 0;
+  pressureHpa = valueHpa;
+  pressureHasValue = true;
+  pressureLastUpdateMs = now;
+  appendPressureTrendSample(now, valueHpa);
+}
+
 uint8_t winsenChecksum(const uint8_t* frame) {
   uint8_t sum = 0;
   for (uint8_t index = 1; index <= 7; ++index) sum = static_cast<uint8_t>(sum + frame[index]);
@@ -346,6 +790,11 @@ void updatePhysicalAlarm(uint32_t now) {
   bool buzzer = false;
   bool vibration = false;
   bool strobe = false;
+  if (trailAlertLevel != 0 &&
+      static_cast<uint32_t>(now - trailAlertRefreshMs) > TRAIL_ALERT_WATCHDOG_MS) {
+    trailAlertLevel = 0;
+    sendOutputEvent("off", false);
+  }
   if (coAlarmLatched) {
     buzzer = now % 1000 < 500;
     vibration = now % 1000 < 700;
@@ -354,6 +803,14 @@ void updatePhysicalAlarm(uint32_t now) {
     const uint32_t phase = now % 10000;
     buzzer = phase < 180;
     vibration = phase < 350;
+  }
+  if (trailAlertLevel != 0 && !coAlarmLatched) {
+    if (trailAlertLevel == 2) {
+      const uint32_t phase = now % 2000;
+      vibration = vibration || phase < 300 || (phase >= 500 && phase < 800);
+    } else {
+      vibration = vibration || now % 5000 < 200;
+    }
   }
   digitalWrite(BUZZER_PIN, buzzer ? HIGH : LOW);
   digitalWrite(VIBRATION_PIN, vibration ? HIGH : LOW);
@@ -388,13 +845,42 @@ void appendGpsJson(Print& output, uint32_t now) {
 
 void appendEnvironmentJson(Print& output, uint32_t now) {
   const bool valid = environmentFresh(now);
+  const bool pressureValid = pressureFresh(now);
   output.print(",\"env\":{\"valid\":"); output.print(valid ? "true" : "false");
+  output.print(",\"sht_valid\":"); output.print(valid ? "true" : "false");
+  output.print(",\"pressure_valid\":"); output.print(pressureValid ? "true" : "false");
   output.print(",\"temp_c\":");
   if (valid) output.print(temperatureC, 2); else output.print("null");
   output.print(",\"humidity_pct\":");
   if (valid) output.print(humidityPct, 2); else output.print("null");
+  output.print(",\"press_hpa\":");
+  if (pressureValid) output.print(pressureHpa, 2); else output.print("null");
+  output.print(",\"press_trend\":\"");
+  output.print(pressureValid ? pressureTrendName() : "unknown");
+  output.print("\"");
   output.print(",\"age_s\":");
   if (environmentHasValue) output.print((now - environmentLastUpdateMs) / 1000.0f, 1);
+  else output.print("null");
+  output.print(",\"press_age_s\":");
+  if (pressureHasValue) output.print((now - pressureLastUpdateMs) / 1000.0f, 1);
+  else output.print("null");
+  output.print(",\"bmp_address\":");
+  if (bmp390Address != 0) output.print(bmp390Address); else output.print("null");
+  output.print("}");
+}
+
+void appendRtcJson(Print& output, uint32_t now) {
+  const bool valid = rtcValid &&
+      static_cast<uint32_t>(now - rtcLastUpdateMs) <= SENSOR_STALE_MS;
+  output.print(",\"rtc\":{\"valid\":"); output.print(valid ? "true" : "false");
+  output.print(",\"iso_utc\":");
+  if (valid) {
+    output.print("\""); output.print(rtcIsoUtc); output.print("\"");
+  } else {
+    output.print("null");
+  }
+  output.print(",\"age_s\":");
+  if (rtcLastUpdateMs != 0) output.print((now - rtcLastUpdateMs) / 1000.0f, 1);
   else output.print("null");
   output.print("}");
 }
@@ -417,25 +903,22 @@ void appendCoJson(Print& output, uint32_t now) {
 }
 
 void sendTelemetry(uint32_t now) {
-  char base[620];
+  char base[760];
   FixedBufferWriter output(base, sizeof(base));
   output.print("{\"v\":1,\"event\":\"telemetry\",\"seq\":");
   output.print(telemetrySequence++);
   output.print(",\"uptime_ms\":"); output.print(now);
   output.print(","); appendGpsJson(output, now);
+  appendRtcJson(output, now);
   appendEnvironmentJson(output, now);
   appendCoJson(output, now);
-  output.print(",\"power\":{\"valid\":false,\"percent\":null,\"days_left\":null}}");
+  output.print(",\"power\":{\"valid\":false,\"percent\":null,\"days_left\":null");
+  output.print(",\"jetson_gate_on\":"); output.print(jetsonPowerGateOn ? "true" : "false");
+  output.print(",\"shutdown_pending\":"); output.print(powerShutdownPending ? "true" : "false");
+  output.print("}}");
   if (output.overflowed() || output.length() < 2) return;
 
-  const uint16_t checksum = crc16Ccitt(reinterpret_cast<const uint8_t*>(output.data()), output.length());
-  base[output.length() - 1] = '\0';
-  char checksumText[5];
-  snprintf(checksumText, sizeof(checksumText), "%04X", checksum);
-  Serial.print(base);
-  Serial.print(",\"crc16\":\"");
-  Serial.print(checksumText);
-  Serial.println("\"}");
+  sendChecksummedJson(base, output.length());
 }
 
 void sendFix(uint32_t now) {
@@ -469,6 +952,45 @@ void handleHostCommand(char* command, uint32_t now) {
     sendTelemetry(now);
   } else if (strcmp(command, "GET_FIX") == 0) {
     sendFix(now);
+  } else if (strcmp(command, "ALERT TRAIL ON") == 0) {
+    trailAlertLevel = 2;
+    trailAlertRefreshMs = now;
+    sendOutputEvent("alert", true);
+  } else if (strcmp(command, "ALERT TRAIL CAUTION") == 0) {
+    trailAlertLevel = 1;
+    trailAlertRefreshMs = now;
+    sendOutputEvent("caution", true);
+  } else if (strcmp(command, "ALERT TRAIL OFF") == 0) {
+    trailAlertLevel = 0;
+    sendOutputEvent("off", false);
+  } else if (strcmp(command, "POWER OFF ACK") == 0) {
+    if (jetsonPowerGateOn && powerShutdownPending) {
+      if (!powerGateOffScheduled) {
+        powerGateOffScheduled = true;
+        powerGateOffScheduledMs = now;
+      }
+      sendPowerEvent("shutdown_ack");
+    } else {
+      Serial.println("{\"ok\":false,\"event\":\"error\",\"reason\":\"power_not_pending\"}");
+    }
+  } else if (strcmp(command, "POWER OFF CANCEL") == 0) {
+    if (jetsonPowerGateOn && powerShutdownPending) {
+      powerGateOffScheduled = false;
+      powerShutdownPending = false;
+      sendPowerEvent("shutdown_cancelled");
+    } else {
+      Serial.println("{\"ok\":false,\"event\":\"error\",\"reason\":\"power_not_pending\"}");
+    }
+  } else if (strcmp(command, "POWER STATUS") == 0) {
+    sendPowerEvent("status");
+  } else if (strncmp(command, "SET RTC UTC ", 12) == 0) {
+    if (provisionRtcUtc(command + 12, now)) {
+      Serial.print("{\"ok\":true,\"event\":\"rtc_set\",\"iso_utc\":\"");
+      Serial.print(rtcIsoUtc);
+      Serial.println("\"}");
+    } else {
+      Serial.println("{\"ok\":false,\"event\":\"error\",\"reason\":\"rtc_set_failed\"}");
+    }
   } else if (strcmp(command, "PING") == 0) {
     Serial.println("{\"ok\":true,\"event\":\"pong\",\"v\":1}");
   } else if (*command != '\0') {
@@ -495,9 +1017,14 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(VIBRATION_PIN, OUTPUT);
   pinMode(STROBE_PIN, OUTPUT);
+  pinMode(JETSON_POWER_GATE_PIN, OUTPUT);
+  pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(CHECKPOINT_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(VOICE_BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(BUZZER_PIN, LOW);
   digitalWrite(VIBRATION_PIN, LOW);
   digitalWrite(STROBE_PIN, LOW);
+  digitalWrite(JETSON_POWER_GATE_PIN, HIGH);
 
   Serial.begin(HOST_BAUD);
   GpsSerial.begin(GPS_BAUD);
@@ -505,6 +1032,7 @@ void setup() {
   Wire.setSDA(PB9);
   Wire.setSCL(PB8);
   Wire.begin();
+  initializeBmp390(millis());
   Serial.println("{\"ok\":true,\"event\":\"boot\",\"v\":1,\"role\":\"sensor_hub\"}");
 }
 
@@ -513,8 +1041,12 @@ void loop() {
   pumpGps(now);
   pumpCo(now);
   updateEnvironment(now);
+  updatePressure(now);
+  updateRtc(now);
   evaluateCo(now);
   updatePhysicalAlarm(now);
+  updateButtons(now);
+  updatePowerGate(now);
   pumpHost(now);
   if (streamEnabled && static_cast<uint32_t>(now - lastTelemetryMs) >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = now;

@@ -1,4 +1,4 @@
-> 정본: https://github.com/SmartAid-Kit/.github/blob/main/AGENTS.md
+> 정본: https://github.com/2026-ESCW-OGTECH/.github/blob/main/AGENTS.md
 > 이 파일은 사본입니다. 고치면 정본과 다른 레포 사본도 같이 고칩니다.
 
 # SafeAid Kit — 에이전트 진입 지침
@@ -6,8 +6,9 @@
 이 파일은 이 작업공간에서 일하는 모든 코딩 에이전트(Codex, Claude Code 등)의 **단일 진입점**입니다.
 `CLAUDE.md`는 이 파일과 내용이 같습니다. 둘 중 하나를 고치면 다른 하나도 같이 고칩니다.
 
-> **저장소·조직 이름은 `smartaid-*` / `SmartAid-Kit`으로 고정입니다.**
-> 제출 URL·git remote·CI가 여기에 묶여 있어 이름은 바꾸지 않습니다. 도메인만 바뀌었습니다.
+> **팀명은 `OGTECH`, 조직은 `2026-ESCW-OGTECH`, 저장소는 `OGTECH-*`입니다.** (2026-08-20 확정)
+> 제품명은 `SafeAid Kit`으로 유지합니다. 이 이름은 여기서 고정이며 다시 바꾸지 않습니다.
+> Jetson systemd 유닛명(`smartaid-map.service` 등)은 코드 식별자이므로 그대로 둡니다.
 
 ---
 
@@ -102,7 +103,7 @@ S1 감시 0.35 W × 14h + S2 항법 0.55 W × 10h + S3 화면 13 W × 23분 + S4
 
 ## 3. 안전 계약 — 절대 규칙
 
-`smartaid-org/docs/AI_AGENT_GUIDE.md`가 원본입니다. 충돌하면 그쪽이 우선합니다.
+`OGTECH-org/docs/AI_AGENT_GUIDE.md`가 원본입니다. 충돌하면 그쪽이 우선합니다.
 
 1. **경로·방위·거리는 절대 LLM이 생성하지 않습니다.**
    방위각·거리·"이쪽으로 가세요"는 지도 엔진(코드)이 GPS와 타일 데이터로 계산합니다.
@@ -292,16 +293,16 @@ Chromium이 llama-server와 GPU·통합 메모리를 나눠 씁니다.
 
 | 경로 | 용도 |
 |---|---|
-| `smartaid-backend/` | Python API 서버. 안전 분기·고정 카드·지도 타일 서빙·일출몰·Zambretti. `runtime/` |
-| `smartaid-frontend/` | 7인치 1024×600 Chromium 키오스크 UI(지도·글랜서블)와 프록시 서버 |
-| `smartaid-embedded/` | **STM32 상시 전원 관리자 + 센서 허브 + GNSS 로거** 펌웨어 |
-| `smartaid-llm/` | LLM 설정·하네스·평가·실행·측정 문서. **`docs2/`가 신 도메인 정본** |
-| `smartaid-org/` | GitHub `.github` 저장소 정본. 조직 프로필, 공통 문서, 안전 지침 |
+| `OGTECH-backend/` | Python API 서버. 안전 분기·고정 카드·지도 타일 서빙·일출몰·Zambretti. `runtime/` |
+| `OGTECH-frontend/` | 7인치 1024×600 Chromium 키오스크 UI(지도·글랜서블)와 프록시 서버 |
+| `OGTECH-embedded/` | **STM32 상시 전원 관리자 + 센서 허브 + GNSS 로거** 펌웨어 |
+| `OGTECH-llm/` | LLM 설정·하네스·평가·실행·측정 문서. **`docs2/`가 신 도메인 정본** |
+| `OGTECH-org/` | GitHub `.github` 저장소 정본. 조직 프로필, 공통 문서, 안전 지침 |
 
 각 컴포넌트 저장소의 루트가 곧 해당 컴포넌트입니다. `runtime/` 산출물은 커밋하지 않습니다.
 
-**문서 우선순위**: `PLAN.md`(작업 계획) → `AGENTS.md`(규칙) → `smartaid-llm/docs2/`(근거·상세).
-`smartaid-llm/docs/`와 `legacy/`는 **구 의료 도메인**입니다. 근거로 인용하지 마세요.
+**문서 우선순위**: `PLAN.md`(작업 계획) → `AGENTS.md`(규칙) → `OGTECH-llm/docs2/`(근거·상세).
+`OGTECH-llm/docs/`와 `legacy/`는 **구 의료 도메인**입니다. 근거로 인용하지 마세요.
 
 ---
 
@@ -310,10 +311,10 @@ Chromium이 llama-server와 GPU·통합 메모리를 나눠 씁니다.
 Jetson에서는 backend와 frontend 저장소를 함께 clone하고 다음 순서로 실행합니다.
 
 ```bash
-cd smartaid-backend
+cd OGTECH-backend
 python app.py
 
-cd ../smartaid-frontend
+cd ../OGTECH-frontend
 python server.py --backend http://127.0.0.1:8765
 ```
 
@@ -329,9 +330,9 @@ STM32 상시 계층은 Jetson과 독립적으로 동작하며, Jetson 전원을 
 - 기존 패턴을 따릅니다. 새 추상화를 먼저 만들지 않습니다.
 - 요청받은 범위 안에서만 고칩니다. 관련 없는 파일을 다시 쓰지 않습니다.
 - 하드웨어와 맞닿은 변경(센서, 전원 계층, GNSS, 외함, 데모 스크립트)을 우선합니다.
-- `legacy/`와 `smartaid-llm/docs/`(구 의료)를 근거로 제안하지 않습니다. 폐기된 전제입니다.
+- `legacy/`와 `OGTECH-llm/docs/`(구 의료)를 근거로 제안하지 않습니다. 폐기된 전제입니다.
 - 수치를 인용할 때는 **`[실측]` / `[출처]` / `[추정]` / `[미검증]`** 중 하나를 반드시 붙입니다.
-- GitHub 커밋·push·PR·공개 점검은 [정본 운영 절차](https://github.com/SmartAid-Kit/.github/blob/main/docs/GITHUB_OPERATIONS.md)를 따릅니다.
+- GitHub 커밋·push·PR·공개 점검은 [정본 운영 절차](https://github.com/2026-ESCW-OGTECH/.github/blob/main/docs/GITHUB_OPERATIONS.md)를 따릅니다.
 
 ### 완료 조건
 
@@ -343,17 +344,17 @@ STM32 상시 계층은 Jetson과 독립적으로 동작하며, Jetson 전원을 
 - [ ] 안전 계약 10개 중 어느 것도 위반하지 않았다
 
 ```bash
-# smartaid-frontend
+# OGTECH-frontend
 python -B -m unittest discover -s tests -v
 
-# smartaid-backend
+# OGTECH-backend
 python -c "import app; print('import ok')"
 python -B -m unittest discover -v
 ```
 
 backend에서 `Ran 0 tests`가 나오면 테스트 통과가 아니라 테스트가 없는 상태로 기록합니다.
 embedded는 사용 가능한 Arduino CLI 또는 PlatformIO 도구체인을 확인한 뒤 빌드 결과를 기록합니다.
-LLM 평가는 `smartaid-llm/eval/`에 평가 코드가 추가된 뒤 해당 저장소에서 실행합니다.
+LLM 평가는 `OGTECH-llm/eval/`에 평가 코드가 추가된 뒤 해당 저장소에서 실행합니다.
 
 ### 데모 성공 조건
 
@@ -379,4 +380,4 @@ LLM 평가는 `smartaid-llm/eval/`에 평가 코드가 추가된 뒤 해당 저�
 | 3 | Jetson SC7 딥슬립 복귀 시간 vs 콜드 부팅 | W1 |
 | 4 | HDMI + USB 능동 연장 케이블 길이·신호 무결성 | W2 |
 | 5 | 배터리 4S5P(360 Wh) vs 시연용 4S3P(216 Wh) | W2 |
-| 6 | 제품 표시명 — 저장소명 `smartaid-*`는 고정 | W2 |
+| ~~6~~ | ~~제품 표시명~~ — **2026-08-20 확정.** 팀 `OGTECH` / 조직 `2026-ESCW-OGTECH` / 저장소 `OGTECH-*` / 제품 `SafeAid Kit` | 완료 |

@@ -16,7 +16,7 @@ Jetson 전원이 꺼져 있어도 CO 물리 경보는 계속된다. GPS 미수�
 HDOP를 미터 정확도로 임의 변환하지 않는다.
 
 배선·빌드·검증 절차는 프런트엔드 MAP의
-[`STM32_JETSON_SETUP.md`](../smartaid-frontend/MAP/STM32_JETSON_SETUP.md)를 따른다.
+[`STM32_JETSON_SETUP.md`](../OGTECH-frontend/MAP/STM32_JETSON_SETUP.md)를 따른다.
 
 ## 검증 상태
 
