@@ -1,7 +1,7 @@
 # OGTECH-embedded — STM32 상시 계층 펌웨어
 
 **SafeAid Kit** (2026 임베디드 소프트웨어 경진대회 자유공모 / 팀 OGTECH) 의 펌웨어 저장소입니다.
-[조직 개요](https://github.com/2026-ESCW-OGTECH) · [다른 저장소 안내](https://github.com/2026-ESCW-OGTECH/.github)
+[조직 개요](https://github.com/2026-ESW-OGTECH) · [다른 저장소 안내](https://github.com/2026-ESW-OGTECH/.github)
 
 ---
 
@@ -133,7 +133,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)  { SensorApp_UART_ErrorCa
 ```
 
 배선과 Jetson 연동 절차는 프런트엔드 저장소의
-[`MAP/STM32_JETSON_SETUP.md`](https://github.com/2026-ESCW-OGTECH/OGTECH-frontend/blob/main/MAP/STM32_JETSON_SETUP.md)를 참고합니다.
+[`MAP/STM32_JETSON_SETUP.md`](https://github.com/2026-ESW-OGTECH/OGTECH-frontend/blob/main/MAP/STM32_JETSON_SETUP.md)를 참고합니다.
 
 ## 설계 원칙
 
