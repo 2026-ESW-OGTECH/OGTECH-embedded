@@ -62,13 +62,13 @@ DHT11=ERROR,CO=WARMING_UP(18s),GPS=NOT_FOUND
 
 ```text
 stm32_smart_tray_controller/
-├─ stm32_smart_tray_controller.ino   펌웨어 본체 (STM32 HAL / CubeIDE main.c 구조)
-└─ README.md                         핀 배치와 프로토콜 메모
+├─ stm32_smart_tray_controller.c   펌웨어 본체 (STM32 HAL / CubeIDE main.c 구조)
+└─ README.md                       핀 배치와 프로토콜 메모
 ```
 
-> **파일 확장자 주의** — 내용은 STM32 HAL C 코드(`main.c` 구조)인데 확장자가 `.ino`입니다.
-> Git 이력 연속성 때문에 유지하고 있으며, Arduino IDE/CLI로는 빌드되지 않습니다.
-> STM32CubeIDE 프로젝트에서 빌드합니다. 폴더 이름 `stm32_smart_tray_controller`도 같은 이유로 유지합니다.
+> Arduino 스케치가 아니라 **STM32 HAL C 코드**입니다. STM32CubeIDE 프로젝트에서 빌드하며
+> Arduino IDE/CLI로는 빌드되지 않습니다.
+> 폴더 이름 `stm32_smart_tray_controller`는 Git 이력 연속성 때문에 유지합니다.
 
 ## 설계 원칙
 
