@@ -298,6 +298,8 @@ static void GPS_ParseLine(char *line)
   if (lat_ok && lon_ok)
   {
     gps_data.fix = 1u;
+    gps_data.ever_fix = 1u;
+    gps_data.last_fix_ms = HAL_GetTick();
   }
   else
   {

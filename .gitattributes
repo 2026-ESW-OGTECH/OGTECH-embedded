@@ -8,5 +8,5 @@
 *.txt text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
-*.ino text eol=lf
-*.ps1 text eol=crlf
+*.c text eol=lf
+*.h text eol=lf

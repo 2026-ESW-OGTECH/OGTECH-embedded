@@ -12,6 +12,8 @@ typedef struct
   int32_t  lat_e7;
   int32_t  lon_e7;
   uint32_t last_nmea_ms;
+  uint8_t  ever_fix;      /* 부팅 후 한 번이라도 fix를 받았는지 (텔레메트리 last_age_s용) */
+  uint32_t last_fix_ms;   /* 마지막 fix 좌표 갱신 시각 */
 } Air530_Data_t;
 
 /* Starts continuous 1-byte interrupt reception. */
