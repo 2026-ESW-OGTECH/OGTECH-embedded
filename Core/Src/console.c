@@ -2,10 +2,12 @@
 
 #include <string.h>
 
-#define CONSOLE_RING_SIZE 32u
+#define CONSOLE_RING_SIZE 256u
 
-static UART_HandleTypeDef *console_uart = NULL;
-static uint8_t console_rx_byte;
+static UART_HandleTypeDef *console_link = NULL;    /* Jetson 프로토콜 링크 */
+static UART_HandleTypeDef *console_mirror = NULL;  /* 사람 콘솔(선택) */
+static uint8_t console_rx_byte;                    /* 링크 1바이트 수신 버퍼 */
+static uint8_t console_mirror_rx_byte;             /* 미러 1바이트 수신 버퍼 */
 
 static volatile uint8_t  console_ring[CONSOLE_RING_SIZE];
 static volatile uint16_t console_head = 0u;
@@ -38,33 +40,53 @@ static uint8_t Console_RingPop(uint8_t *b)
   return 1u;
 }
 
-HAL_StatusTypeDef Console_Init(UART_HandleTypeDef *huart)
+HAL_StatusTypeDef Console_Init(UART_HandleTypeDef *link, UART_HandleTypeDef *mirror)
 {
-  if (huart == NULL)
+  HAL_StatusTypeDef status;
+
+  if (link == NULL)
   {
     return HAL_ERROR;
   }
 
-  console_uart = huart;
+  console_link = link;
+  console_mirror = (mirror == link) ? NULL : mirror;
   console_head = 0u;
   console_tail = 0u;
   console_line_len = 0u;
   console_discard = 0u;
 
-  return HAL_UART_Receive_IT(console_uart, &console_rx_byte, 1u);
+  status = HAL_UART_Receive_IT(console_link, &console_rx_byte, 1u);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+  if (console_mirror != NULL)
+  {
+    /* 미러 수신 실패는 링크 동작을 막지 않는다 — 미러를 송신 전용으로 강등한다. */
+    if (HAL_UART_Receive_IT(console_mirror, &console_mirror_rx_byte, 1u) != HAL_OK)
+    {
+      console_mirror_rx_byte = 0u;
+    }
+  }
+  return HAL_OK;
 }
 
 void Console_Print(const char *text)
 {
-  if ((console_uart == NULL) || (text == NULL))
+  uint16_t len;
+
+  if ((console_link == NULL) || (text == NULL))
   {
     return;
   }
 
-  (void)HAL_UART_Transmit(console_uart,
-                          (uint8_t *)text,
-                          (uint16_t)strlen(text),
-                          HAL_MAX_DELAY);
+  len = (uint16_t)strlen(text);
+  (void)HAL_UART_Transmit(console_link, (uint8_t *)text, len, HAL_MAX_DELAY);
+  if (console_mirror != NULL)
+  {
+    (void)HAL_UART_Transmit(console_mirror, (uint8_t *)text, len, HAL_MAX_DELAY);
+  }
 }
 
 uint8_t Console_ReadLine(char *out, size_t cap)
@@ -115,7 +137,7 @@ uint8_t Console_ReadLine(char *out, size_t cap)
     }
     else
     {
-      console_discard = 1u;  /* 31자 초과: 이 라인 전체를 폐기 모드로 전환 */
+      console_discard = 1u;  /* 63자 초과: 이 라인 전체를 폐기 모드로 전환 */
       console_line_len = 0u;
     }
   }
@@ -125,17 +147,26 @@ uint8_t Console_ReadLine(char *out, size_t cap)
 
 void Console_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if ((console_uart != NULL) && (huart == console_uart))
+  if ((console_link != NULL) && (huart == console_link))
   {
     Console_RingPush(console_rx_byte);
-    (void)HAL_UART_Receive_IT(console_uart, &console_rx_byte, 1u);
+    (void)HAL_UART_Receive_IT(console_link, &console_rx_byte, 1u);
+  }
+  else if ((console_mirror != NULL) && (huart == console_mirror))
+  {
+    Console_RingPush(console_mirror_rx_byte);
+    (void)HAL_UART_Receive_IT(console_mirror, &console_mirror_rx_byte, 1u);
   }
 }
 
 void Console_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if ((console_uart != NULL) && (huart == console_uart))
+  if ((console_link != NULL) && (huart == console_link))
   {
-    (void)HAL_UART_Receive_IT(console_uart, &console_rx_byte, 1u);
+    (void)HAL_UART_Receive_IT(console_link, &console_rx_byte, 1u);
+  }
+  else if ((console_mirror != NULL) && (huart == console_mirror))
+  {
+    (void)HAL_UART_Receive_IT(console_mirror, &console_mirror_rx_byte, 1u);
   }
 }

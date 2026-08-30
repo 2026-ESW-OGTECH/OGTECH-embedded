@@ -276,7 +276,7 @@ static void Trail_Watchdog(uint32_t now)
   }
 }
 
-/* ---------- 명령 처리 (USART3) ---------- */
+/* ---------- 명령 처리 (Jetson 링크 UART4 · 미러 USART3) ---------- */
 
 static void Command_Handle(const char *line)
 {
@@ -344,16 +344,17 @@ static void Commands_Process(void)
 
 HAL_StatusTypeDef SensorApp_Init(UART_HandleTypeDef *gps_uart,
                                  UART_HandleTypeDef *co_uart,
-                                 UART_HandleTypeDef *console_uart)
+                                 UART_HandleTypeDef *link_uart,
+                                 UART_HandleTypeDef *mirror_uart)
 {
   HAL_StatusTypeDef status;
 
-  if ((gps_uart == NULL) || (co_uart == NULL) || (console_uart == NULL))
+  if ((gps_uart == NULL) || (co_uart == NULL) || (link_uart == NULL))
   {
     return HAL_ERROR;
   }
 
-  status = Console_Init(console_uart);
+  status = Console_Init(link_uart, mirror_uart);
   if (status != HAL_OK)
   {
     return status;
@@ -380,7 +381,8 @@ HAL_StatusTypeDef SensorApp_Init(UART_HandleTypeDef *gps_uart,
   JetsonGate_Init();  /* 부팅 시 Jetson 전원 ON (GATE OFF 명령으로 차단 데모 가능) */
 
   Console_Print("\r\n=== SURVIVAL SENSOR START ===\r\n");
-  Console_Print("USART1=Air530 GPS 9600, USART2=ZE16B-CO 9600, USART3=Jetson/TeraTerm 115200\r\n");
+  Console_Print("USART1=Air530 GPS 9600, USART2=ZE16B-CO 9600, "
+                "UART4=Jetson JSONL 115200, USART3=console mirror 115200\r\n");
   Console_Print("CMD: PING | STATUS | GATE ON/OFF | STREAM ON/OFF"
                 " | ALERT TRAIL ON/CAUTION/OFF | POWER OFF ACK/CANCEL\r\n");
 

@@ -1,4 +1,9 @@
-"""Receive and validate OGTECH STM32 telemetry on a Jetson UART."""
+"""Receive and validate OGTECH STM32 telemetry on a Jetson UART.
+
+진단 도구 — `$OGT1`/`$SA1` XOR CSV(구 펌웨어)를 읽어 JSON으로 찍는다.
+정본 펌웨어(Core/, JSONL v1)의 수신은 OGTECH-frontend `MAP/gps_service.py`(`--gps-mode stm32`)가 맡는다.
+기본 포트는 Xavier NX devkit 40핀 UART `/dev/ttyTHS0`(2026-08-30 실기 기준, WORKLOG #6).
+"""
 
 from __future__ import annotations
 
@@ -64,7 +69,7 @@ def parse_frame(raw: str | bytes) -> Telemetry:
         raise FrameError(f"checksum mismatch: expected {expected:02X}, got {actual:02X}")
 
     fields = body.split(",")
-    if len(fields) != 12 or fields[0] != "OGT1":
+    if len(fields) != 12 or fields[0] not in {"OGT1", "SA1"}:
         raise FrameError("unsupported protocol or field count")
 
     try:
@@ -140,7 +145,7 @@ def receive(port: str, baud: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default="/dev/ttyTHS1")
+    parser.add_argument("--port", default="/dev/ttyTHS0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()

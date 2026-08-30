@@ -37,8 +37,8 @@ static int failures = 0;
 
 /* ---------- 입력 주입 — 실제 HAL 콜백 경로를 탄다 ---------- */
 
-/* Jetson/TeraTerm이 USART3로 보내는 바이트. ISR(콜백)과 main loop 처리가 교차하도록
- * 바이트마다 명령 처리를 돌린다 — 링버퍼(32바이트)보다 긴 입력도 그대로 재현된다. */
+/* Jetson이 UART4(링크)로 보내는 바이트. ISR(콜백)과 main loop 처리가 교차하도록
+ * 바이트마다 명령 처리를 돌린다. */
 static void feed_command(const char *bytes)
 {
   const char *p;
@@ -46,6 +46,32 @@ static void feed_command(const char *bytes)
   for (p = bytes; *p != '\0'; p++)
   {
     console_rx_byte = (uint8_t)*p;
+    HAL_UART_RxCpltCallback(&huart4);
+    Commands_Process();
+  }
+}
+
+/* 링크로 바이트를 밀어 넣되 main loop는 돌리지 않는다 — 블로킹 송신(≈29 ms) 중
+ * ISR만 도는 상황(링 버퍼 256 B) 재현용. */
+static void feed_command_isr_only(const char *bytes)
+{
+  const char *p;
+
+  for (p = bytes; *p != '\0'; p++)
+  {
+    console_rx_byte = (uint8_t)*p;
+    HAL_UART_RxCpltCallback(&huart4);
+  }
+}
+
+/* TeraTerm이 USART3(미러)로 보내는 바이트. */
+static void feed_mirror_command(const char *bytes)
+{
+  const char *p;
+
+  for (p = bytes; *p != '\0'; p++)
+  {
+    console_mirror_rx_byte = (uint8_t)*p;
     HAL_UART_RxCpltCallback(&huart3);
     Commands_Process();
   }
@@ -158,9 +184,12 @@ static void test_init_banner(void)
 {
   /* SensorApp_Init는 main()에서 호출 — 여기서는 mock Instance 설정 후 직접 호출 */
   mock_uart3_reset();
-  CHECK(SensorApp_Init(&huart1, &huart2, &huart3) == HAL_OK, "sensor app init");
+  CHECK(SensorApp_Init(&huart1, &huart2, &huart4, &huart3) == HAL_OK, "sensor app init");
+  CHECK(strstr(mock_uart4_capture, "=== SURVIVAL SENSOR START ===") != NULL,
+        "boot banner on jetson link");
   CHECK(strstr(mock_uart3_capture, "=== SURVIVAL SENSOR START ===") != NULL,
-        "boot banner");
+        "boot banner mirrored to console");
+  CHECK(strcmp(mock_uart3_capture, mock_uart4_capture) == 0, "mirror equals link");
   CHECK(strstr(mock_uart3_capture, "STREAM ON/OFF") != NULL, "banner lists commands");
   CHECK(mock_gate_pin == GPIO_PIN_SET, "gate on at boot");
   CHECK(JetsonGate_IsOn() == 1u, "gate state at boot");
@@ -180,10 +209,16 @@ static void test_human_commands(void)
         "unknown command");
 
   mock_uart3_reset();
-  feed_command("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA GATE OFF\n");
+  feed_command("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA GATE OFF\n");
   CHECK(strcmp(mock_uart3_capture, "ERR LINE_TOO_LONG\r\n") == 0,
         "overlong line discarded");
   CHECK(JetsonGate_IsOn() == 1u, "overlong tail not executed");
+
+  /* 미러(TeraTerm, USART3)로 들어온 명령도 같은 파서를 탄다 */
+  mock_uart3_reset();
+  feed_mirror_command("PING\r\n");
+  CHECK(strcmp(mock_uart3_capture, "PONG\r\n") == 0, "mirror ping -> pong");
+  CHECK(strcmp(mock_uart4_capture, "PONG\r\n") == 0, "mirror answer also on link");
 
   mock_uart3_reset();
   feed_command("STATUS\n");
@@ -263,6 +298,44 @@ static void test_nmea_path_to_telemetry(void)
     Air530_Process();
   }
   CHECK(gps_data.satellites == 9u, "bad checksum sentence rejected");
+
+  /* 체크섬 필드 자체가 없는 문장도 거부 (2026-08-30, WORKLOG #3) */
+  {
+    const char *nochk = "$GNGGA,123519,3732.5076,N,12704.7710,E,1,04,0.9,45.0,M,0.0,M,,\r\n";
+    const char *p;
+    for (p = nochk; *p != '\0'; p++) { gps_rx_byte = (uint8_t)*p; HAL_UART_RxCpltCallback(&huart1); }
+    Air530_Process();
+  }
+  CHECK(gps_data.satellites == 9u, "sentence without checksum rejected");
+}
+
+static void test_link_ring_survives_blocking_tx(void)
+{
+  /* 텔레메트리 블로킹 송신(≈29 ms ≈ 334 B) 동안 Jetson 명령이 몰려도 링(256 B)이 받아 둔다.
+   * 옛 32 B 링에서는 두 번째 명령부터 깨졌다(WORKLOG #10). */
+  preset_full_sensors();
+  mock_uart3_reset();
+  feed_command_isr_only("ALERT TRAIL CAUTION\nPING\nPING\nALERT TRAIL ON\nPING\nGATE OFF\nPING\nSTATUS\nPING\n");
+  Commands_Process();
+  {
+    int pongs = 0;
+    const char *p = mock_uart4_capture;
+    while ((p = strstr(p, "PONG\r\n")) != NULL) { pongs++; p += 6; }
+    CHECK(pongs == 5, "all five PINGs answered after burst");
+  }
+  CHECK(trail_level == TP_TRAIL_ALERT, "burst commands applied in order");
+  CHECK(JetsonGate_IsOn() == 0u, "gate off inside burst applied");
+  CHECK(strstr(mock_uart4_capture, "ERR") == NULL, "no line error in burst");
+  JetsonGate_Set(1u);
+  trail_level = TP_TRAIL_OFF;
+}
+
+static void test_dht11_unlocks_dwt(void)
+{
+  mock_dwt.LAR = 0u;
+  DHT11_Init();
+  CHECK(mock_dwt.LAR == 0xC5ACCE55u, "dht11 init writes DWT LAR unlock key");
+  CHECK((mock_dwt.CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0u, "cyccnt enabled");
 }
 
 static void test_co_frame_path_to_alarm(void)
@@ -376,7 +449,7 @@ static void test_gate_and_power_events(void)
 
 static void emit_capture(void)
 {
-  fputs(mock_uart3_capture, stdout);
+  fputs(mock_uart4_capture, stdout);   /* Jetson 링크(UART4)에 실제로 나간 바이트 */
   mock_uart3_reset();
 }
 
@@ -445,10 +518,11 @@ int main(int argc, char **argv)
   huart1.Instance = USART1;
   huart2.Instance = USART2;
   huart3.Instance = USART3;
+  huart4.Instance = UART4;
 
   if ((argc > 1) && (strcmp(argv[1], "--emit") == 0))
   {
-    if (SensorApp_Init(&huart1, &huart2, &huart3) != HAL_OK)
+    if (SensorApp_Init(&huart1, &huart2, &huart4, &huart3) != HAL_OK)
     {
       return EXIT_FAILURE;
     }
@@ -465,6 +539,8 @@ int main(int argc, char **argv)
   test_telemetry_sequence();
   test_trail_output();
   test_gate_and_power_events();
+  test_link_ring_survives_blocking_tx();
+  test_dht11_unlocks_dwt();
 
   if (failures != 0)
   {

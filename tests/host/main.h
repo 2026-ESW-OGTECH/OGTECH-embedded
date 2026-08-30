@@ -89,6 +89,7 @@ typedef struct
 #define USART1 ((void *)0x1001)
 #define USART2 ((void *)0x1002)
 #define USART3 ((void *)0x1003)
+#define UART4  ((void *)0x1004)
 
 #define GPIOA ((void *)0xA000)
 #define GPIOB ((void *)0xB000)
@@ -164,7 +165,7 @@ typedef struct
 /* ---------- mock 레지스터 블록 ---------- */
 
 typedef struct { volatile uint32_t DEMCR; } MockCoreDebug;
-typedef struct { volatile uint32_t CYCCNT; volatile uint32_t CTRL; } MockDwt;
+typedef struct { volatile uint32_t CYCCNT; volatile uint32_t CTRL; volatile uint32_t LAR; } MockDwt;
 typedef struct { volatile uint32_t CKGAENR; } MockRcc;
 
 static MockCoreDebug mock_core_debug;
@@ -190,8 +191,10 @@ static uint32_t SystemCoreClock = 64000000u;
 static uint32_t mock_tick_ms = 0u;
 
 #define MOCK_UART3_CAP 8192u
-static char   mock_uart3_capture[MOCK_UART3_CAP];
+static char   mock_uart3_capture[MOCK_UART3_CAP];   /* USART3 = 사람 콘솔 미러 */
 static size_t mock_uart3_len = 0u;
+static char   mock_uart4_capture[MOCK_UART3_CAP];   /* UART4 = Jetson 링크(JSONL) */
+static size_t mock_uart4_len = 0u;
 
 static GPIO_PinState mock_gate_pin = GPIO_PIN_RESET;
 static GPIO_PinState mock_buzzer_pin = GPIO_PIN_RESET;
@@ -201,6 +204,8 @@ static inline void mock_uart3_reset(void)
 {
   mock_uart3_len = 0u;
   mock_uart3_capture[0] = '\0';
+  mock_uart4_len = 0u;
+  mock_uart4_capture[0] = '\0';
 }
 
 /* ---------- 함수형 매크로 ---------- */
@@ -277,6 +282,13 @@ static inline HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h,
     memcpy(&mock_uart3_capture[mock_uart3_len], data, len);
     mock_uart3_len += len;
     mock_uart3_capture[mock_uart3_len] = '\0';
+  }
+  else if ((h->Instance == UART4) &&
+           ((mock_uart4_len + (size_t)len) < (MOCK_UART3_CAP - 1u)))
+  {
+    memcpy(&mock_uart4_capture[mock_uart4_len], data, len);
+    mock_uart4_len += len;
+    mock_uart4_capture[mock_uart4_len] = '\0';
   }
   return HAL_OK;
 }

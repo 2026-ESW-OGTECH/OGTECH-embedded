@@ -1,6 +1,12 @@
-# OGTECH STM32 센서 허브 + Jetson UART4 적용 안내
+# OGTECH STM32 센서 허브 + Jetson UART4 적용 안내 (참고용 스냅샷 — 2026-08-30 정본에 흡수됨)
 
-이 디렉터리는 실제 STM32CubeMX 프로젝트에 바로 적용할 수 있는 UART4 통합 스냅샷이다.
+> **이 디렉터리는 더 이상 빌드 대상이 아니다.** 2026-08-30 정본 `Core/`가 UART4를 Jetson 링크로 쓰도록 통합됐다
+> (JSONL+CRC16 v1 그대로, `Core/Src/main.c`·`console.c`·`cubemx/Core/`). 이 스냅샷의 `$OGT1` XOR CSV는 정본
+> 파서(`OGTECH-frontend/MAP/gps_service.py`)가 호환 경로로만 받는다. `Core/`와 이 디렉터리를 한 프로젝트에 같이
+> 넣으면 `HAL_UART_RxCpltCallback`/`HAL_UART_ErrorCallback` 중복 정의로 링크 오류가 난다(WORKLOG #13).
+> 아래 내용은 08-29 당시 기록이며, `drop_in/` 경로는 실제로는 이 디렉터리의 `Core/Inc`·`Core/Src`다(WORKLOG #5).
+
+이 디렉터리는 실제 STM32CubeMX 프로젝트에 바로 적용할 수 있는 UART4 통합 스냅샷이었다.
 루트 `Core/`의 JSONL+CRC16 프로토콜과 이 디렉터리의 `OGT1`+XOR 프로토콜은 서로 호환되지
 않으므로, STM32의 이 코드와 `jetson/uart_receiver.py`를 한 쌍으로 사용한다.
 

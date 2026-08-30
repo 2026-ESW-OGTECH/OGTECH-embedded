@@ -25,6 +25,16 @@ class UartReceiverTest(unittest.TestCase):
         self.assertEqual(telemetry.co_ppm, 12)
         self.assertEqual(telemetry.latitude, 37.5465126)
 
+    def test_parse_current_sa1_firmware_frame(self) -> None:
+        # 공개 DEMO 좌표 fixture. 실측 GPS 좌표는 저장소에 넣지 않는다.
+        body = "SA1,4758,4758034,1,287,530,1,0,2,375465126,1270757141,7"
+        telemetry = uart_receiver.parse_frame(make_frame(body))
+
+        self.assertEqual(telemetry.sequence, 4758)
+        self.assertEqual(telemetry.temperature_c, 28.7)
+        self.assertEqual(telemetry.humidity_percent, 53.0)
+        self.assertEqual(telemetry.latitude, 37.5465126)
+
     def test_rejects_checksum_mismatch(self) -> None:
         with self.assertRaisesRegex(uart_receiver.FrameError, "checksum mismatch"):
             uart_receiver.parse_frame("$OGT1,1,2,0,0,0,0,0,0,0,0,0*00")

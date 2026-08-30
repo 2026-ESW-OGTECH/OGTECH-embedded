@@ -80,8 +80,9 @@ static uint8_t NMEA_ChecksumOK(const char *line)
   star = strchr(line, '*');
   if (star == NULL)
   {
-    /* Preserve original behavior: accept a sentence with no checksum field. */
-    return 1u;
+    /* 체크섬 필드가 없는 문장은 거부한다 — 노이즈로 '*'가 깨진 문장이 검증 없이
+     * 좌표로 채택되는 경로를 막는다(README "무체크섬 문장 거부", 2026-08-30 WORKLOG #3). */
+    return 0u;
   }
 
   if ((star[1] == '\0') || (star[2] == '\0'))

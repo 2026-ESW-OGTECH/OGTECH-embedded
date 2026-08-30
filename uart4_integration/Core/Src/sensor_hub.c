@@ -38,7 +38,7 @@ static volatile uint16_t co_head;
 static volatile uint16_t co_tail;
 
 static char gps_line[GPS_LINE_SIZE];
-static uint16_t gps_line_length;
+static volatile uint16_t gps_line_length;
 static uint8_t gps_nmea_seen;
 static uint8_t gps_fix;
 static uint8_t gps_satellites;
@@ -48,7 +48,7 @@ static uint32_t gps_last_nmea_ms;
 static uint32_t gps_last_fix_ms;
 
 static uint8_t co_frame[CO_FRAME_SIZE];
-static uint8_t co_frame_length;
+static volatile uint8_t co_frame_length;
 static uint8_t co_valid;
 static uint16_t co_ppm;
 static uint32_t co_last_valid_ms;
@@ -530,13 +530,16 @@ static JetsonGpsState_t CurrentGpsState(uint32_t now)
 static void DebugPrint(uint32_t now)
 {
   char line[240];
+  uint16_t temperature_abs = (uint16_t)((dht.temperature_x10 < 0) ?
+      -(int32_t)dht.temperature_x10 : (int32_t)dht.temperature_x10);
   int length = snprintf(
       line, sizeof(line),
-      "DHT=%s,T=%d.%dC,H=%u.%u%%,CO_STATE=%u,CO=%uppm,"
+      "DHT=%s,T=%s%u.%uC,H=%u.%u%%,CO_STATE=%u,CO=%uppm,"
       "GPS_STATE=%u,LAT_E7=%ld,LON_E7=%ld,SAT=%u\r\n",
       dht.valid ? "OK" : "ERROR",
-      (int)(dht.temperature_x10 / 10),
-      abs((int)(dht.temperature_x10 % 10)),
+      (dht.temperature_x10 < 0) ? "-" : "",
+      (unsigned)(temperature_abs / 10U),
+      (unsigned)(temperature_abs % 10U),
       (unsigned)(dht.humidity_x10 / 10U),
       (unsigned)(dht.humidity_x10 % 10U),
       (unsigned)CurrentCoState(now), (unsigned)co_ppm,

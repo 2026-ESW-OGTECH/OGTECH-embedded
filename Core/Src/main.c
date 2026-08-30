@@ -18,6 +18,7 @@
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart4;   /* Jetson 링크 — PC10/PC11, 40핀 UART(/dev/ttyTHS0) */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -26,6 +27,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_UART4_Init(void);
 
 /* USER CODE BEGIN 0 */
 /* USER CODE END 0 */
@@ -42,9 +44,11 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
+  MX_UART4_Init();
 
   /* USER CODE BEGIN 2 */
-  if (SensorApp_Init(&huart1, &huart2, &huart3) != HAL_OK)
+  /* 링크 = UART4(Jetson 40핀), 미러 = USART3(ST-LINK VCP, TeraTerm). */
+  if (SensorApp_Init(&huart1, &huart2, &huart4, &huart3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -229,6 +233,46 @@ static void MX_USART3_UART_Init(void)
   }
 
   if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief UART4 Initialization Function — Jetson 링크 (PC10 TX / PC11 RX, 115200 8N1)
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
   {
     Error_Handler();
   }

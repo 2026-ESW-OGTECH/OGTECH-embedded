@@ -39,17 +39,22 @@ HAL_SYSCFG_AnalogSwitchConfig    PA0 아날로그 스위치
 ## 현재 펌웨어가 하는 일
 
 STM32 HAL(STM32CubeIDE) 기반입니다. 인터럽트 수신 + 링 버퍼로 두 UART 센서를 동시에 받고,
-2초마다 Jetson 파서와 계약된 **JSONL + CRC16 텔레메트리 한 줄**을 출력합니다
-(사람용 상태 줄은 `STATUS` 명령으로 즉시 확인).
+2초마다 Jetson 파서와 계약된 **JSONL + CRC16 텔레메트리 한 줄**을 **UART4(Jetson 40핀)** 로 내보내며
+같은 줄을 USART3(ST-LINK 가상 COM)에 미러합니다(사람용 상태 줄은 `STATUS` 명령으로 즉시 확인).
+
+> **2026-08-30 통합** — 종전 Jetson 링크(USART3 · `/dev/ttyACM0`)와 팀 스냅샷 `uart4_integration/`(`$OGT1` XOR CSV)의
+> 두 갈래를 **정본 `Core/` + UART4 링크** 하나로 합쳤다. 프로토콜은 JSONL v1 그대로, 배선만 UART4 PC10/PC11 ↔
+> Jetson `/dev/ttyTHS0`. `uart4_integration/`은 참고용으로만 남긴다(빌드에 같이 넣지 말 것 — `HAL_UART_*Callback` 중복 정의).
 
 | 계통 | 부품 | 인터페이스 | 구현 내용 |
 |---|---|---|---|
 | 안전 | **ZE16B-CO** | USART2 · 9600 | 9바이트 프레임 동기화(`FF 04 03`), 체크섬 검증, ppm 산출 |
 | 안전 | **CO 경보 판정 + 부저** | GPIO PB0 | 35 ppm 3분 지속 WARN · 100 ppm 즉시 ALARM · 30 ppm 미만 30초 해제 |
 | 전원 | **Jetson MOSFET gate** | GPIO PC9 | active-high 게이트 제어. 부팅 시 ON, `GATE ON/OFF` 명령으로 전환 |
-| 환경 | **DHT11** | GPIO 단선 | DWT 마이크로초 지연 기반 비트뱅잉, 5바이트 판독 (판독 구간 인터럽트 차단) |
-| 측위 | **Air530 GNSS** | USART1 · 9600 | NMEA 체크섬 검증(무체크섬 문장 거부), fix·위성 수·위경도(E7) 파싱 |
-| 출력 | Jetson/콘솔 | USART3 · 115200 | 2초 주기 JSONL+CRC16 텔레메트리(프로토콜 v1), `STREAM`/`ALERT TRAIL`/`POWER OFF`/`GATE`/`PING`/`STATUS` 명령 수신 |
+| 환경 | **DHT11** | GPIO PA0 단선 | DWT 마이크로초 지연 기반 비트뱅잉(DWT LAR 잠금 해제 + 2 ms tick 상한), 5바이트 판독. 판독 중 인터럽트는 막지 않는다(UART 링 버퍼가 받는다) |
+| 측위 | **Air530 GNSS** | USART1 · 9600 | NMEA 체크섬 검증(무체크섬·불일치 문장 거부), fix·위성 수·위경도(E7) 파싱 |
+| 출력 | Jetson 링크 | **UART4 · 115200** (PC10 TX / PC11 RX ↔ Jetson 40핀 `/dev/ttyTHS0`) | 2초 주기 JSONL+CRC16 텔레메트리(프로토콜 v1), `STREAM`/`ALERT TRAIL`/`POWER OFF`/`GATE`/`PING`/`STATUS` 명령 수신 |
+| 출력 | 사람 콘솔 미러 | USART3 · 115200 (ST-LINK VCP) | 링크와 같은 출력, 같은 명령 수신(TeraTerm). `SensorApp_Init`에 NULL을 주면 비활성 |
 
 ## 구성
 
@@ -62,10 +67,13 @@ Core/
    ├─ ze16b_co.c           9바이트 프레임 · 체크섬 · ppm
    ├─ co_alarm.c           CO 경보 상태기(latched) · 부저 PB0
    ├─ jetson_gate.c        Jetson 전원 MOSFET gate PC9
-   ├─ console.c            USART3 수신 링 버퍼 · 줄 조립 · 과길이 폐기 · 송신
+   ├─ console.c            링크(UART4)+미러(USART3) 수신 링 버퍼(256 B) · 줄 조립 · 과길이 폐기 · 양쪽 송신
    ├─ telemetry_protocol.c Jetson 프로토콜 v1 — JSONL+CRC16 빌더 · 명령 파서 (HAL 비의존)
    ├─ sensor_app.c         통합 계층 — 2초 주기 · 명령 처리 · 텔레메트리 스냅샷 · watchdog
-   └─ main.c               CubeMX/HAL 초기화와 진입점 (USER CODE 영역만 사용)
+   └─ main.c               CubeMX/HAL 초기화와 진입점 (USART1/2/3 + UART4, USER CODE 영역만 사용)
+cubemx/Core/                 CubeMX 생성물 사본(2026-08-30, 팀 .ioc 기준) — main.h(DHT11_DATA=PA0) · stm32h7xx_it.c/.h(UART 4개 IRQ) · stm32h7xx_hal_msp.c(핀·클럭·NVIC)
+uart4_integration/           팀 통합 스냅샷(08-29, `$OGT1` XOR CSV) — 참고용. 정본과 함께 빌드하지 않는다
+jetson/uart_receiver.py      `$OGT1`/`$SA1` CSV 수신 진단 도구(구 펌웨어용). 정본 링크의 수신은 OGTECH-frontend MAP/gps_service.py
 tests/
 ├─ host/                   gcc 호스트 테스트 — mock HAL 위에서 Core/Src 전체를 컴파일·시뮬레이션
 │  └─ run_host_tests.sh    C 단위(프로토콜) + 펌웨어 시뮬레이션 실행기
@@ -83,7 +91,7 @@ tests/
 | `ze16b_co` | UART RX 인터럽트 바이트 버퍼링(64 B 링), 9바이트 프레임 동기화·체크섬, ppm 산출 |
 | `co_alarm` | 35/100/30 ppm 경보 상태기(센서 단절 시 latched 유지), 부저 패턴 구동, 예열·신선도 판정 |
 | `jetson_gate` | PC9 gate 초기화(부팅 ON)·전환·상태 조회 |
-| `console` | USART3 RX 링 버퍼(32 B)·개행 종결 줄 조립·31자 초과 줄 폐기(`ERR LINE_TOO_LONG`)·블로킹 송신 |
+| `console` | 링크·미러 두 UART의 RX를 공용 링 버퍼(256 B)로 수신, 개행 종결 줄 조립, 63자 초과 줄 폐기(`ERR LINE_TOO_LONG`), 링크→미러 순 블로킹 송신 |
 | `telemetry_protocol` | CRC-16/CCITT-FALSE, telemetry/output/power 이벤트 JSONL 빌더, 명령 11종 파서. 부동소수점 서식 미사용 |
 | `sensor_app` | 모듈 통합, 2초 주기 DHT11 샘플링·텔레메트리 송출, 명령 처리, 트레일 watchdog, 사람용 `STATUS` 줄, UART 콜백 분배 |
 | `main` | HAL 초기화, `SensorApp_Init()` / `SensorApp_Process()` 호출, HAL UART 콜백 전달 |
@@ -91,10 +99,14 @@ tests/
 ## UART 배선
 
 ```text
-USART1 : Air530 GPS        9600 bps
-USART2 : ZE16B-CO          9600 bps
-USART3 : Jetson / 콘솔   115200 bps  (ST-LINK 가상 COM 포트)
+USART1 : Air530 GPS        9600 bps   PB6 TX / PB7 RX
+USART2 : ZE16B-CO          9600 bps   PD5 TX / PD6 RX
+UART4  : Jetson 링크     115200 bps   PC10 TX → Jetson RX(40핀 pin 10) / PC11 RX ← Jetson TX(pin 8) / GND 공통
+USART3 : 사람 콘솔 미러  115200 bps   PD8/PD9 → ST-LINK 가상 COM 포트(TeraTerm)
 ```
+
+Jetson 쪽 장치명은 `/dev/ttyTHS0`(Xavier NX devkit serial@3100000)이며, JetPack 기본 `nvgetty.service`가
+이 포트에 로그인 프롬프트를 띄우므로 `sudo systemctl disable --now nvgetty`가 선행돼야 한다(2026-08-30 실기 확인).
 
 ## 출력 형식 — JSONL 텔레메트리 (프로토콜 v1)
 
@@ -164,20 +176,26 @@ Jetson 전원이 게이트로 차단된 상태(`GATE=OFF`)에서도 판정과 �
 **이 저장소만 clone해서는 빌드되지 않습니다.**
 
 1. STM32CubeIDE에서 **NUCLEO-H7A3ZI-Q**(`-Q` 접미사 디바이스) 프로젝트를 생성합니다.
-2. USART1/2/3과 DHT11 데이터 핀을 설정합니다.
+2. USART1(9600)·USART2(9600)·USART3(115200)·**UART4(115200, PC10/PC11)** 와 DHT11 데이터 핀(PA0)을 설정합니다.
    핀 라벨은 반드시 **`DHT11_DATA`** 로 지정합니다 — 드라이버가 CubeMX가 만드는
    `DHT11_DATA_Pin` · `DHT11_DATA_GPIO_Port` 매크로를 그대로 씁니다.
    PB0(부저)·PC9(gate)는 모듈이 직접 초기화하므로 CubeMX에서 다른 용도로 잡지 않습니다.
-3. `Core/Inc`, `Core/Src`의 모듈 **전부**(`telemetry_protocol` 포함)를 프로젝트에 넣습니다.
-4. 생성된 `main.c`의 USER CODE 영역에 `SensorApp_Init()`, `SensorApp_Process()`,
-   그리고 아래 콜백 전달만 추가합니다.
+3. **NVIC에서 USART1 · USART2 · USART3 · UART4 global interrupt를 전부 Enable**(Preemption 5 / Sub 0)합니다.
+   네 UART 모두 1바이트 인터럽트 수신이라 하나라도 꺼져 있으면 해당 입력이 오류 없이 무음이 됩니다
+   (2026-08-29 팀 `.ioc`는 USART1/2가 Disabled였음 — WORKLOG #9). `cubemx/Core/Src/stm32h7xx_hal_msp.c`의
+   USER CODE 블록에도 같은 NVIC 줄을 넣어 두어 재생성에도 살아남습니다.
+4. `Core/Inc`, `Core/Src`의 모듈 **전부**(`telemetry_protocol` 포함)를 프로젝트에 넣습니다.
+   `uart4_integration/`은 넣지 않습니다(콜백 중복 정의로 링크 오류).
+5. 생성된 `main.c`는 `Core/Src/main.c`로 대체하거나, USER CODE 영역에 `SensorApp_Init(&huart1, &huart2, &huart4, &huart3)`,
+   `SensorApp_Process()`, 그리고 아래 콜백 전달만 추가합니다. `cubemx/Core/`의 `main.h`·`stm32h7xx_it.*`·`stm32h7xx_hal_msp.c`는
+   팀 `.ioc`로 생성한 것과 같은 내용이며 대조용입니다.
 
 ```c
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) { SensorApp_UART_RxCpltCallback(huart); }
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)  { SensorApp_UART_ErrorCallback(huart); }
 ```
 
-콘솔(USART3 115200)은 보드의 ST-LINK 가상 COM 포트로 나옵니다.
+Jetson은 UART4(40핀 `/dev/ttyTHS0`)에서 JSONL을 받고, 사람 콘솔(USART3 115200)은 보드의 ST-LINK 가상 COM 포트로 나옵니다.
 
 ### 호스트 테스트 (하드웨어 없이)
 
@@ -221,6 +239,7 @@ HAL 콜백 → 링 버퍼 → 파서 → 응답 경로(NMEA 문장, ZE16B 프레
 | DHT11 비트뱅잉 판독 | 구현 완료, 실장 검증 `[미검증]` |
 | Air530 NMEA 파싱·fix 판정 | 구현 완료, 호스트 시뮬레이션(GGA 주입·체크섬 거부) 통과, 실장 검증 `[미검증]` |
 | JSONL+CRC16 텔레메트리 · `STREAM`/`ALERT TRAIL`/`POWER OFF` 명령 | 구현 완료(2026-08-21). **호스트 테스트 통과**(C 단위 + 펌웨어 시뮬레이션 + 실제 Jetson 파서 왕복 계약 8건). CubeIDE 빌드·실장 `[미검증]` |
+| UART4 Jetson 링크 + USART3 미러, 256 B 명령 링, NMEA 무체크섬 거부, DWT LAR 잠금 해제 | 구현 완료(2026-08-30). 호스트 시뮬레이션(링크·미러 동일 출력, 미러 명령, 9개 명령 버스트 무손실, 무체크섬 거부, LAR 키) + 계약 테스트 통과. **CubeIDE 빌드·플래시·실장 `[미검증]`** — 보드에는 아직 `$SA1` 펌웨어가 올라가 있다(WORKLOG #38) |
 | Jetson 측 텔레메트리 파서·CRC 테스트 | 프런트엔드 저장소에서 통과 — 펌웨어 출력과 형식 일치(위 계약 테스트로 상호 검증) |
 | H7 보드 컴파일 | `[미검증]` — CubeMX 프로젝트가 이 저장소 밖에 있음 |
 | Jetson 전원 OFF 상태 CO 경보 연속 20회 | `[미검증]` — 펌웨어 구현은 완료, 실장 검증이 남아 있음 |
