@@ -9,7 +9,6 @@
  *   USART2 -> ZE16B-CO
  *   UART4  -> Jetson(GpsService) 링크 — JSONL+CRC16 telemetry + commands (PC10/PC11, 40핀 UART)
  *   USART3 -> 사람 콘솔 미러(TeraTerm, ST-LINK VCP) — 같은 출력, 같은 명령 수신. NULL 허용
- *   PB0    -> CO alarm buzzer
  *   PC9    -> Jetson power MOSFET gate
  *
  * 드라이버(air530_gps · dht11 · ze16b_co · co_alarm · jetson_gate · console)와

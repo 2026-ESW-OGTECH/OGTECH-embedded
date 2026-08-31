@@ -1,8 +1,5 @@
 #include "co_alarm.h"
 
-#define BUZZER_GPIO_PORT   GPIOB
-#define BUZZER_GPIO_PIN    GPIO_PIN_0   /* Nucleo-144 LD1(green)와 공유 - 데모 가시성 겸용 */
-
 #define CO_WARN_PPM        35u          /* 주의: 35 ppm 지속 */
 #define CO_WARN_HOLD_MS    180000u      /* 3분 지속 시 WARN */
 #define CO_ALARM_PPM       100u         /* 100 ppm 즉시 ALARM (예열 중에도) */
@@ -16,37 +13,8 @@ static uint32_t co_clear_since_ms = 0u;
 static uint8_t  co_clear_tracking = 0u;
 static uint32_t alarm_boot_ms = 0u;
 
-static void Buzzer_Update(uint32_t now)
-{
-  /* ALARM: 200 ms 단속음. WARN: 2초마다 100 ms 비프. NONE: off. */
-  GPIO_PinState out = GPIO_PIN_RESET;
-
-  if (co_alarm_state == CO_ALARM_ALARM)
-  {
-    out = ((now / 200u) % 2u) ? GPIO_PIN_SET : GPIO_PIN_RESET;
-  }
-  else if (co_alarm_state == CO_ALARM_WARN)
-  {
-    out = ((now % 2000u) < 100u) ? GPIO_PIN_SET : GPIO_PIN_RESET;
-  }
-
-  HAL_GPIO_WritePin(BUZZER_GPIO_PORT, BUZZER_GPIO_PIN, out);
-}
-
 void CoAlarm_Init(uint32_t boot_ms)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /* 부저: push-pull, 초기값 OFF */
-  HAL_GPIO_WritePin(BUZZER_GPIO_PORT, BUZZER_GPIO_PIN, GPIO_PIN_RESET);
-  GPIO_InitStruct.Pin = BUZZER_GPIO_PIN;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(BUZZER_GPIO_PORT, &GPIO_InitStruct);
-
   co_alarm_state = CO_ALARM_NONE;
   co_warn_tracking = 0u;
   co_clear_tracking = 0u;
@@ -77,7 +45,6 @@ void CoAlarm_Update(uint32_t now, const ZE16BCO_Data_t *co)
   {
     co_warn_tracking = 0u;
     co_clear_tracking = 0u;
-    Buzzer_Update(now);
     return;
   }
 
@@ -87,13 +54,11 @@ void CoAlarm_Update(uint32_t now, const ZE16BCO_Data_t *co)
     co_alarm_state = CO_ALARM_ALARM;
     co_warn_tracking = 0u;
     co_clear_tracking = 0u;
-    Buzzer_Update(now);
     return;
   }
 
   if (CoAlarm_IsWarmingUp(now))
   {
-    Buzzer_Update(now);
     return; /* 예열 중 저농도 값은 판정에 쓰지 않는다. */
   }
 
@@ -110,7 +75,6 @@ void CoAlarm_Update(uint32_t now, const ZE16BCO_Data_t *co)
     {
       co_alarm_state = CO_ALARM_WARN;
     }
-    Buzzer_Update(now);
     return;
   }
 
@@ -133,8 +97,6 @@ void CoAlarm_Update(uint32_t now, const ZE16BCO_Data_t *co)
   {
     co_clear_tracking = 0u;
   }
-
-  Buzzer_Update(now);
 }
 
 CoAlarmState_t CoAlarm_GetState(void)

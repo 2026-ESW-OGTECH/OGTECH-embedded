@@ -365,15 +365,18 @@ static void test_co_frame_path_to_alarm(void)
   CHECK(strstr(mock_uart3_capture, "\"level\":\"alarm\",\"alarm\":true") != NULL,
         "co stale keeps alarm");
 
-  /* 버저는 ALARM에서 200 ms 단속 — tick 100..199 구간은 ON */
+  /* 경보음은 Jetson 스피커가 낸다 — 펌웨어는 PB0(구 부저)를 어느 상태에서도 건드리지 않는다.
+     ALARM 유지 중 부저 펄스 구간(tick 100..199)에 해당하는 시각도 포함해 확인한다. */
   mock_tick_ms = 100300u;
   co_data.last_valid_ms = mock_tick_ms;
   co_data.ppm = 150u;
   CoAlarm_Update(HAL_GetTick(), ZE16BCO_GetData());
-  CHECK(mock_buzzer_pin == GPIO_PIN_SET, "buzzer on in alarm pulse");
+  CHECK(mock_pb0_pin == GPIO_PIN_RESET, "no buzzer output in alarm pulse window");
   mock_tick_ms = 100450u;
   CoAlarm_Update(HAL_GetTick(), ZE16BCO_GetData());
-  CHECK(mock_buzzer_pin == GPIO_PIN_RESET, "buzzer off between pulses");
+  CHECK(CoAlarm_GetState() == CO_ALARM_ALARM, "alarm state kept without buzzer");
+  CHECK(mock_pb0_pin == GPIO_PIN_RESET, "no buzzer output between pulses");
+  CHECK(mock_pb0_writes == 0u, "PB0 never driven");
 }
 
 static void test_telemetry_sequence(void)

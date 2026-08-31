@@ -197,7 +197,9 @@ static char   mock_uart4_capture[MOCK_UART3_CAP];   /* UART4 = Jetson 링크(JSO
 static size_t mock_uart4_len = 0u;
 
 static GPIO_PinState mock_gate_pin = GPIO_PIN_RESET;
-static GPIO_PinState mock_buzzer_pin = GPIO_PIN_RESET;
+/* 구 부저 핀. 경보음이 Jetson 스피커로 옮겨간 뒤로는 아무도 쓰지 않아야 한다. */
+static GPIO_PinState mock_pb0_pin = GPIO_PIN_RESET;
+static uint32_t      mock_pb0_writes = 0u;
 static GPIO_PinState mock_dht_read_state = GPIO_PIN_RESET;
 
 static inline void mock_uart3_reset(void)
@@ -248,7 +250,8 @@ static inline void HAL_GPIO_WritePin(void *port, uint16_t pin, GPIO_PinState sta
   }
   else if ((port == GPIOB) && (pin == GPIO_PIN_0))
   {
-    mock_buzzer_pin = state;
+    mock_pb0_pin = state;
+    mock_pb0_writes += 1u;
   }
 }
 

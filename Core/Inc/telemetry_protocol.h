@@ -92,7 +92,7 @@ typedef struct
 {
   uint8_t   valid;         /* 3초 이내 유효 ZE16B 프레임 존재 */
   uint8_t   warming_up;    /* 부팅 후 30초 예열 구간 */
-  uint8_t   alarm;         /* 경보 부저 작동 중 (level=ALARM과 일치해야 함) */
+  uint8_t   alarm;         /* 경보 발령 중 (level=ALARM과 일치해야 함). 소리는 Jetson 스피커 */
   TpCoLevel level;
   uint16_t  ppm;           /* valid=1일 때만 사용 */
   uint8_t   has_age;
